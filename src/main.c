@@ -71,14 +71,14 @@ int16_t adc_buf[ADC_BUF_SZ];
 // global
 const float M_PI = 3.14159265358979323846f;
 uint16_t per = (int)( CPU_CLK / (2*MOD_FREQ) );
-const float freq_start = 60;  // hz
+const float freq_start = 140.0f;  // hz
 float ALFA_RPM = 0.003;
 int adc_ndx = 0;
+volatile uint32_t adc_raw = 1;
 float phase = 0.0f;
-float target_frequency = 60.0f; /* Hz */
-float amplitude = 0.8f;        /* 0..1 */
+float amplitude = 0.777f;        /* 0-1 is max */
 float phase_increment = 0.0f;
-
+int mode = 0; // 0=uninitialized, 1=init
 
 /* USER CODE END PV */
 
@@ -106,6 +106,7 @@ void SetInjectedBEMFChannel(uint32_t adc_channel);
 void ADC1_2_IRQHandler(void)
 {
     HAL_ADC_IRQHandler(&hadc1);
+
 }
 
 
@@ -114,35 +115,31 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 
   if (hadc->Instance == ADC1)
   {
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);  // e.g., toggle an LED
     //uint32_t t0 = DWT->CYCCNT;
 
-    uint32_t adc_raw = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_1);
-
-    adc_buf[adc_ndx] = adc_raw;
-
+    adc_raw = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_1);
 
     ++adc_ndx;
     if (adc_ndx >= ADC_BUF_SZ) adc_ndx = 0;
+    adc_buf[adc_ndx] = adc_raw;
 
 
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
 
-    generate_3phase_ac(per * .5f);
+
+    generate_3phase_ac(amplitude);
 
   }
 }
 
 void generate_3phase_ac(float amplitude) {
-    //float phase_increment = 2.0f * M_PI * frequency / MOD_FREQ;
-    
-    float phase_a = sinf(phase);
+    float phase_a = sinf(phase + 0.0f * M_PI / 3.0f);
     float phase_b = sinf(phase + 2.0f * M_PI / 3.0f);
     float phase_c = sinf(phase + 4.0f * M_PI / 3.0f);
     
-    uint16_t duty_a = (uint16_t)((phase_a * amplitude + 1.0f) * 0.5f * per);
-    uint16_t duty_b = (uint16_t)((phase_b * amplitude + 1.0f) * 0.5f * per);
-    uint16_t duty_c = (uint16_t)((phase_c * amplitude + 1.0f) * 0.5f * per);
+    uint16_t duty_a = (uint16_t)((phase_a + 1.0f) * 0.5f * amplitude * 0.5f * per);
+    uint16_t duty_b = (uint16_t)((phase_b + 1.0f) * 0.5f * amplitude * 0.5f * per);
+    uint16_t duty_c = (uint16_t)((phase_c + 1.0f) * 0.5f * amplitude * 0.5f * per);
     
     if (duty_a > per) duty_a = per;
     if (duty_b > per) duty_b = per;
@@ -175,7 +172,10 @@ void SetInjectedBEMFChannel(uint32_t adc_channel)
   sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_RISING;
   sConfigInjected.InjecOversamplingMode = DISABLE;
 
-  HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected);
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 
@@ -244,6 +244,11 @@ int main(void)
 
   HAL_Delay(50);
 
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
   // enable ADC interrupt
   __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_JEOC);
   __HAL_ADC_GET_IT_SOURCE(&hadc1, ADC_IT_JEOC);
@@ -269,29 +274,47 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  uint32_t TASK_HANDLER_LIM = CPU_CLK / 100;
-  uint32_t TASK_HANDLER_EL ;
+  uint32_t TASK_HANDLER_LIM = CPU_CLK;
+  uint32_t TASK_HANDLER_EL = 0;
   uint32_t TASK_HANDLER_t0 = DWT->CYCCNT ;
 
+  uint32_t MON_HANDLER_LIM = CPU_CLK/10000;
+  uint32_t MON_HANDLER_EL = 0;
+  uint32_t MON_HANDLER_t0 = DWT->CYCCNT ;
+
+
   // set ref channel for startup
-  SetInjectedBEMFChannel(ADC_CHANNEL_14);
+  SetInjectedBEMFChannel(ADC_CHANNEL_1);
   // start counting
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
 
 
+  mode = 1;
   printf("\r\n\r\n\r\nstarting\r\n\r\n\r\n");
 
   HAL_Delay(200);
-
+  TASK_HANDLER_t0 = DWT->CYCCNT ;
   while (1)
   {
     TASK_HANDLER_EL = DWT->CYCCNT - TASK_HANDLER_t0;
     if (TASK_HANDLER_EL >= TASK_HANDLER_LIM)
     {
+      //printf("task\r\n");/
       // run task
       TASK_HANDLER_t0 = DWT->CYCCNT;
     }
 
+    MON_HANDLER_EL = DWT->CYCCNT - MON_HANDLER_t0;
+    if (MON_HANDLER_EL >= MON_HANDLER_LIM)
+    {
+      printf("%u\r\n", (unsigned long)adc_raw);
+      MON_HANDLER_t0 = DWT->CYCCNT;
+    }
 
 
     /* USER CODE END WHILE */
@@ -485,7 +508,7 @@ static void MX_LPUART1_UART_Init(void)
 
   /* USER CODE END LPUART1_Init 1 */
   hlpuart1.Instance = LPUART1;
-  hlpuart1.Init.BaudRate = 921600;
+  hlpuart1.Init.BaudRate = 2000000;
   hlpuart1.Init.WordLength = UART_WORDLENGTH_8B;
   hlpuart1.Init.StopBits = UART_STOPBITS_1;
   hlpuart1.Init.Parity = UART_PARITY_NONE;
@@ -574,7 +597,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE BEGIN TIM1_Init 1 */
 
-  /* USER CODE END TIM1_Init 1 */
+  /* USER CODE END TIM1_Init 1 */  
   htim1.Instance = TIM1;
   htim1.Init.Prescaler = 0;
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
@@ -586,7 +609,7 @@ static void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_OC4REF;
   sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
   if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
@@ -668,7 +691,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4.294967295E9;
+  htim2.Init.Period = 4294967295;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
