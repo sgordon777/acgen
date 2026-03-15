@@ -45,6 +45,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
+ADC_HandleTypeDef hadc2;
 
 DAC_HandleTypeDef hdac1;
 
@@ -63,7 +64,7 @@ TIM_HandleTypeDef htim2;
 // MACRO
 #define LPF(x, y, A, B) ( x*A + y*B )
 #define CPU_CLK (170.0E6)
-int16_t adc_buf[ADC_BUF_SZ];
+int16_t adc_buf[ADC_BUF_SZ][3];
 
 // param
 #define MOD_FREQ (30000.0)
@@ -71,10 +72,12 @@ int16_t adc_buf[ADC_BUF_SZ];
 // global
 const float M_PI = 3.14159265358979323846f;
 uint16_t per = (int)( CPU_CLK / (2*MOD_FREQ) );
-const float freq_start = 140.0f;  // hz
+const float freq_start = 14.0f;  // hz
 float ALFA_RPM = 0.003;
 int adc_ndx = 0;
-volatile uint32_t adc_raw = 1;
+volatile int32_t adc1_raw = 0;
+volatile int32_t adc2_raw = 0;
+volatile int32_t adc3_raw = 0;
 float phase = 0.0f;
 float amplitude = 0.777f;        /* 0-1 is max */
 float phase_increment = 0.0f;
@@ -92,10 +95,11 @@ static void MX_TIM1_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_SPI3_Init(void);
+static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 void generate_3phase_ac(float amplitude);
-void SetInjectedBEMFChannel(uint32_t adc_channel);
+void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc);
 
 /* USER CODE END PFP */
 
@@ -106,6 +110,9 @@ void SetInjectedBEMFChannel(uint32_t adc_channel);
 void ADC1_2_IRQHandler(void)
 {
     HAL_ADC_IRQHandler(&hadc1);
+    
+    // technically shouldn't be needed since ADC2 has interruptsdisabled
+    //HAL_ADC_IRQHandler(&hadc2); 
 
 }
 
@@ -113,24 +120,28 @@ void ADC1_2_IRQHandler(void)
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
 
-  if (hadc->Instance == ADC1)
+  if (hadc->Instance == ADC1) 
   {
-    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);  // e.g., toggle an LED
-    //uint32_t t0 = DWT->CYCCNT;
-
-    adc_raw = HAL_ADCEx_InjectedGetValue(hadc, ADC_INJECTED_RANK_1);
-
-    ++adc_ndx;
-    if (adc_ndx >= ADC_BUF_SZ) adc_ndx = 0;
-    adc_buf[adc_ndx] = adc_raw;
-
-
-
-
+    adc1_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1) - 2048;
+    adc2_raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1) - 2048;
     generate_3phase_ac(amplitude);
-
   }
+  else
+  {
+    printf("Warning: ADC callback from unknown ADC instance!\n");
+  }
+
+  adc3_raw = 0 - adc1_raw - adc2_raw;
+
+  ++adc_ndx;
+  if (adc_ndx >= ADC_BUF_SZ) adc_ndx = 0;
+  adc_buf[adc_ndx][0] = adc1_raw;
+  adc_buf[adc_ndx][1] = adc2_raw;
+  adc_buf[adc_ndx][2] = adc3_raw;
+
 }
+
+
 
 void generate_3phase_ac(float amplitude) {
     float phase_a = sinf(phase + 0.0f * M_PI / 3.0f);
@@ -153,11 +164,12 @@ void generate_3phase_ac(float amplitude) {
     if (phase >= 2.0f * M_PI) phase -= 2.0f * M_PI;
 }
 
-void SetInjectedBEMFChannel(uint32_t adc_channel)
+//void SetInjectedBEMFChannel(uint32_t adc_channel)
+void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc)
+
 {
   ADC_InjectionConfTypeDef sConfigInjected = {0};
 
-  sConfigInjected.InjectedChannel = adc_channel;
   sConfigInjected.InjectedRank = ADC_INJECTED_RANK_1;
   sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_2CYCLES_5;
   sConfigInjected.InjectedSingleDiff = ADC_SINGLE_ENDED;
@@ -167,14 +179,29 @@ void SetInjectedBEMFChannel(uint32_t adc_channel)
   sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
   sConfigInjected.AutoInjectedConv = DISABLE;
   sConfigInjected.QueueInjectedContext = DISABLE;
-  sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJEC_T1_TRGO;
-
-  sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_RISING;
   sConfigInjected.InjecOversamplingMode = DISABLE;
 
-  if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
+
+  if (hadc->Instance == ADC1)
   {
-    Error_Handler();
+    sConfigInjected.InjectedChannel = ADC_CHANNEL_1;
+    sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJEC_T1_TRGO;
+    sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_RISING;
+    if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+  }
+  else if (hadc->Instance == ADC2)
+  {
+    sConfigInjected.InjectedChannel = ADC_CHANNEL_17;
+    sConfigInjected.ExternalTrigInjecConv = ADC_INJECTED_SOFTWARE_START;
+    sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_NONE;
+    if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+    {
+      Error_Handler();
+    }
   }
 }
 
@@ -238,7 +265,10 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM2_Init();
   MX_SPI3_Init();
+  MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
+  SetInjectedBEMFChannel(&hadc1);
+  SetInjectedBEMFChannel(&hadc2);
 
   phase_increment = 2.0 * M_PI * freq_start / MOD_FREQ;
 
@@ -248,11 +278,22 @@ int main(void)
   {
     Error_Handler();
   }
+  if (HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   // enable ADC interrupt
   __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_JEOC);
   __HAL_ADC_GET_IT_SOURCE(&hadc1, ADC_IT_JEOC);
+  __HAL_ADC_DISABLE_IT(&hadc2, ADC_IT_JEOC);
+  __HAL_ADC_GET_IT_SOURCE(&hadc2, ADC_IT_JEOC);
+
+  /* 1. Start ADC2 (Slave) FIRST and WITHOUT interrupts */
+  HAL_ADCEx_InjectedStart(&hadc2);
+  /* 2. Start ADC1 (Master) SECOND with interrupts */
   HAL_ADCEx_InjectedStart_IT(&hadc1);
+
   HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
 
@@ -284,7 +325,9 @@ int main(void)
 
 
   // set ref channel for startup
-  SetInjectedBEMFChannel(ADC_CHANNEL_1);
+  SetInjectedBEMFChannel(&hadc1);
+  SetInjectedBEMFChannel(&hadc2);
+  
   // start counting
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -312,7 +355,7 @@ int main(void)
     MON_HANDLER_EL = DWT->CYCCNT - MON_HANDLER_t0;
     if (MON_HANDLER_EL >= MON_HANDLER_LIM)
     {
-      printf("%u\r\n", (unsigned long)adc_raw);
+      printf("%d, %d, %d\r\n", adc1_raw, adc2_raw, adc3_raw);
       MON_HANDLER_t0 = DWT->CYCCNT;
     }
 
@@ -414,7 +457,9 @@ static void MX_ADC1_Init(void)
 
   /** Configure the ADC multi-mode
   */
-  multimode.Mode = ADC_MODE_INDEPENDENT;
+  multimode.Mode = ADC_DUALMODE_INJECSIMULT;
+  multimode.DMAAccessMode = ADC_DMAACCESSMODE_DISABLED;
+  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_1CYCLE;
   if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
     Error_Handler();
@@ -442,6 +487,67 @@ static void MX_ADC1_Init(void)
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief ADC2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC2_Init(void)
+{
+
+  /* USER CODE BEGIN ADC2_Init 0 */
+
+  /* USER CODE END ADC2_Init 0 */
+
+  ADC_InjectionConfTypeDef sConfigInjected = {0};
+
+  /* USER CODE BEGIN ADC2_Init 1 */
+
+  /* USER CODE END ADC2_Init 1 */
+
+  /** Common config
+  */
+  hadc2.Instance = ADC2;
+  hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc2.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc2.Init.GainCompensation = 0;
+  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc2.Init.LowPowerAutoWait = DISABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
+  hadc2.Init.NbrOfConversion = 1;
+  hadc2.Init.DiscontinuousConvMode = DISABLE;
+  hadc2.Init.DMAContinuousRequests = DISABLE;
+  hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc2.Init.OversamplingMode = DISABLE;
+  if (HAL_ADC_Init(&hadc2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Injected Channel
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_17;
+  sConfigInjected.InjectedRank = ADC_INJECTED_RANK_1;
+  sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_2CYCLES_5;
+  sConfigInjected.InjectedSingleDiff = ADC_SINGLE_ENDED;
+  sConfigInjected.InjectedOffsetNumber = ADC_OFFSET_NONE;
+  sConfigInjected.InjectedOffset = 0;
+  sConfigInjected.InjectedNbrOfConversion = 1;
+  sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
+  sConfigInjected.AutoInjectedConv = DISABLE;
+  sConfigInjected.QueueInjectedContext = DISABLE;
+  sConfigInjected.InjecOversamplingMode = DISABLE;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+  /* USER CODE END ADC2_Init 2 */
 
 }
 

@@ -11,4 +11,4 @@ Startup
 .cproject
 .mxproject
 .project
-
+*.log
