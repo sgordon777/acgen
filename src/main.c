@@ -78,10 +78,12 @@ int adc_ndx = 0;
 volatile int32_t adc1_raw = 0;
 volatile int32_t adc2_raw = 0;
 volatile int32_t adc3_raw = 0;
+const uint32_t MEASURE_THRESH = ADC_BUF_SZ / 2;
 float phase = 0.0f;
-float amplitude = 0.777f;        /* 0-1 is max */
+float amplitude = 0.25f;        /* 0-1 is max */
 float phase_increment = 0.0f;
-int mode = 0; // 0=uninitialized, 1=init
+int state = 0; // 0=uninitialized, 1=init, 2=calibrating, 3=running
+uint32_t adc_zero = 0;
 
 /* USER CODE END PV */
 
@@ -99,7 +101,7 @@ static void MX_ADC2_Init(void);
 /* USER CODE BEGIN PFP */
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 void generate_3phase_ac(float amplitude);
-void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc);
+void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc, uint32_t channel);
 
 /* USER CODE END PFP */
 
@@ -122,23 +124,38 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 
   if (hadc->Instance == ADC1) 
   {
-    adc1_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1) - 2048;
-    adc2_raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1) - 2048;
-    generate_3phase_ac(amplitude);
+    adc1_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1) - adc_zero;
+    adc2_raw = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1) - adc_zero;
   }
   else
   {
     printf("Warning: ADC callback from unknown ADC instance!\n");
   }
 
-  adc3_raw = 0 - adc1_raw - adc2_raw;
-
-  ++adc_ndx;
-  if (adc_ndx >= ADC_BUF_SZ) adc_ndx = 0;
   adc_buf[adc_ndx][0] = adc1_raw;
   adc_buf[adc_ndx][1] = adc2_raw;
   adc_buf[adc_ndx][2] = adc3_raw;
 
+
+  if (state == 1)
+  {
+    // measure ref voltage before motor running
+    if (adc_ndx < MEASURE_THRESH) 
+    {
+      ++adc_ndx;
+    }
+   
+  }
+  else if (state == 2)
+  {
+    adc3_raw = 0 - adc1_raw - adc2_raw;
+
+
+    generate_3phase_ac(amplitude);
+    ++adc_ndx;
+  }
+
+  if (adc_ndx >= ADC_BUF_SZ) adc_ndx = 0;
 }
 
 
@@ -164,9 +181,7 @@ void generate_3phase_ac(float amplitude) {
     if (phase >= 2.0f * M_PI) phase -= 2.0f * M_PI;
 }
 
-//void SetInjectedBEMFChannel(uint32_t adc_channel)
-void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc)
-
+void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc, uint32_t channel)
 {
   ADC_InjectionConfTypeDef sConfigInjected = {0};
 
@@ -184,7 +199,7 @@ void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc)
 
   if (hadc->Instance == ADC1)
   {
-    sConfigInjected.InjectedChannel = ADC_CHANNEL_1;
+    sConfigInjected.InjectedChannel = channel;
     sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJEC_T1_TRGO;
     sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_RISING;
     if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
@@ -195,7 +210,7 @@ void SetInjectedBEMFChannel(ADC_HandleTypeDef *hadc)
   }
   else if (hadc->Instance == ADC2)
   {
-    sConfigInjected.InjectedChannel = ADC_CHANNEL_17;
+    sConfigInjected.InjectedChannel = channel;
     sConfigInjected.ExternalTrigInjecConv = ADC_INJECTED_SOFTWARE_START;
     sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_NONE;
     if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
@@ -267,8 +282,8 @@ int main(void)
   MX_SPI3_Init();
   MX_ADC2_Init();
   /* USER CODE BEGIN 2 */
-  SetInjectedBEMFChannel(&hadc1);
-  SetInjectedBEMFChannel(&hadc2);
+  SetInjectedBEMFChannel(&hadc1, ADC_CHANNEL_15);
+  SetInjectedBEMFChannel(&hadc2, ADC_CHANNEL_17);
 
   phase_increment = 2.0 * M_PI * freq_start / MOD_FREQ;
 
@@ -315,18 +330,14 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  uint32_t TASK_HANDLER_LIM = CPU_CLK;
+  uint32_t TASK_HANDLER_LIM = CPU_CLK/5;  // 5hz
   uint32_t TASK_HANDLER_EL = 0;
   uint32_t TASK_HANDLER_t0 = DWT->CYCCNT ;
 
-  uint32_t MON_HANDLER_LIM = CPU_CLK/10000;
+  uint32_t MON_HANDLER_LIM = CPU_CLK/10000; // 10Khz
   uint32_t MON_HANDLER_EL = 0;
   uint32_t MON_HANDLER_t0 = DWT->CYCCNT ;
 
-
-  // set ref channel for startup
-  SetInjectedBEMFChannel(&hadc1);
-  SetInjectedBEMFChannel(&hadc2);
   
   // start counting
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
@@ -337,7 +348,7 @@ int main(void)
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
 
 
-  mode = 1;
+  state = 1;
   printf("\r\n\r\n\r\nstarting\r\n\r\n\r\n");
 
   HAL_Delay(200);
@@ -350,12 +361,42 @@ int main(void)
       //printf("task\r\n");/
       // run task
       TASK_HANDLER_t0 = DWT->CYCCNT;
+      if (state == 1)
+      {
+        printf("calibrating\r\n");
+        if (adc_ndx >= MEASURE_THRESH)
+        {
+          float x=0;
+          float one_over_sz = 1.0 / MEASURE_THRESH;
+          for (int i=0; i<MEASURE_THRESH; i++ )
+          {
+            x = x + adc_buf[i][0] * one_over_sz;
+            //printf("ndx=%d, raw=%d val=%f\r\n", i, adc_buf[i] ,x);
+          }
+          adc_zero = (int32_t)x + 0.5;
+
+          // set ref channel for startup
+          SetInjectedBEMFChannel(&hadc1, ADC_CHANNEL_1);
+          SetInjectedBEMFChannel(&hadc2, ADC_CHANNEL_17);
+
+          printf("running,ref_v = %d\r\n", adc_zero);
+          memset(adc_buf, 0, sizeof(adc_buf));
+          HAL_Delay(100);
+          state = 2;
+        }
+
+      }
+
+
     }
 
     MON_HANDLER_EL = DWT->CYCCNT - MON_HANDLER_t0;
     if (MON_HANDLER_EL >= MON_HANDLER_LIM)
     {
-      printf("%d, %d, %d\r\n", adc1_raw, adc2_raw, adc3_raw);
+      //if (state == 3)
+      {
+        printf("%d, %d, %d, %u, %u\r\n", adc1_raw, adc2_raw, adc3_raw, state, adc_ndx);
+      }
       MON_HANDLER_t0 = DWT->CYCCNT;
     }
 
