@@ -39,3 +39,20 @@ SPI
 PC10	out		SPI_CLK
 PC11	in 		MISO
 PB5  	out		MOSI
+
+
+hookup to amp board
+
+        NUCLEO                      8302
+        PIN         FUNC            PIN     FUNC
+PWM_A   CN7-38      TIM1_1_PC0      11      INH-A
+PWM_B   CN7-36      TIM1_2_PC1      13      INH-B
+PWM_C   CN7-35      TIM2_3_PC2      15      INH-C
+EN      CN7-37      GPIO_PC3        10      EN
+SO1     CN7-28      ADC1_CH0_PA0    22      SO1
+SO2     CN7-32      ADC2_CH17_PA4   21      SO2
+REF     CN7-34      ADC1_CH15_PB0   32      REF-1.65V
+ENCA    CN7-17      TIM2_CH1_PA15 
+ENCB    CN7-30      TIM2_CH2_PA1
+
+

@@ -56,7 +56,7 @@ DMA_HandleTypeDef hdma_spi3_rx;
 DMA_HandleTypeDef hdma_spi3_tx;
 
 TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 #define ADC_BUF_SZ (2048)
@@ -68,11 +68,14 @@ int16_t adc_buf[ADC_BUF_SZ][3];
 
 // param
 #define MOD_FREQ (30000.0)
+#define MOTOR_PP (7.0f)
+#define ENC_CPR (4096) // 1024 cpr quadrature
 
 // global
 const float M_PI = 3.14159265358979323846f;
 uint16_t per = (int)( CPU_CLK / (2*MOD_FREQ) );
-const float freq_start = 14.0f;  // hz
+float amplitude = 0.55f;        /* 0-1 is max */
+const float freq_start = 255.0f;  // hz
 float ALFA_RPM = 0.003;
 int adc_ndx = 0;
 volatile int32_t adc1_raw = 0;
@@ -80,10 +83,12 @@ volatile int32_t adc2_raw = 0;
 volatile int32_t adc3_raw = 0;
 const uint32_t MEASURE_THRESH = ADC_BUF_SZ / 2;
 float phase = 0.0f;
-float amplitude = 0.25f;        /* 0-1 is max */
 float phase_increment = 0.0f;
-int state = 0; // 0=uninitialized, 1=init, 2=calibrating, 3=running
+int state = 0; // 0=uninitialized, 1=calibration, 2=running
 uint32_t adc_zero = 0;
+uint16_t encpos0 = 0;
+int16_t del_count = 0;
+float rpm = 0.0f;
 
 /* USER CODE END PV */
 
@@ -95,9 +100,9 @@ static void MX_DAC1_Init(void);
 static void MX_LPUART1_UART_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_ADC1_Init(void);
-static void MX_TIM2_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_ADC2_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 void generate_3phase_ac(float amplitude);
@@ -165,9 +170,9 @@ void generate_3phase_ac(float amplitude) {
     float phase_b = sinf(phase + 2.0f * M_PI / 3.0f);
     float phase_c = sinf(phase + 4.0f * M_PI / 3.0f);
     
-    uint16_t duty_a = (uint16_t)((phase_a + 1.0f) * 0.5f * amplitude * 0.5f * per);
-    uint16_t duty_b = (uint16_t)((phase_b + 1.0f) * 0.5f * amplitude * 0.5f * per);
-    uint16_t duty_c = (uint16_t)((phase_c + 1.0f) * 0.5f * amplitude * 0.5f * per);
+    uint16_t duty_a = (uint16_t)((phase_a + 1.0f) * 0.5f * amplitude * per);
+    uint16_t duty_b = (uint16_t)((phase_b + 1.0f) * 0.5f * amplitude * per);
+    uint16_t duty_c = (uint16_t)((phase_c + 1.0f) * 0.5f * amplitude * per);
     
     if (duty_a > per) duty_a = per;
     if (duty_b > per) duty_b = per;
@@ -278,9 +283,9 @@ int main(void)
   MX_LPUART1_UART_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
-  MX_TIM2_Init();
   MX_SPI3_Init();
   MX_ADC2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   SetInjectedBEMFChannel(&hadc1, ADC_CHANNEL_15);
   SetInjectedBEMFChannel(&hadc2, ADC_CHANNEL_17);
@@ -340,7 +345,7 @@ int main(void)
 
   
   // start counting
-  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
@@ -349,7 +354,7 @@ int main(void)
 
 
   state = 1;
-  printf("\r\n\r\n\r\nstarting\r\n\r\n\r\n");
+  printf("\r\n\r\n\r\ncalibrating ref voltage\r\n\r\n\r\n");
 
   HAL_Delay(200);
   TASK_HANDLER_t0 = DWT->CYCCNT ;
@@ -363,18 +368,22 @@ int main(void)
       TASK_HANDLER_t0 = DWT->CYCCNT;
       if (state == 1)
       {
-        printf("calibrating\r\n");
         if (adc_ndx >= MEASURE_THRESH)
         {
-          float x=0;
+          unsigned x=0;
+          unsigned mean = 0;
+          unsigned min = 4096, max = 0;
           float one_over_sz = 1.0 / MEASURE_THRESH;
           for (int i=0; i<MEASURE_THRESH; i++ )
           {
-            x = x + adc_buf[i][0] * one_over_sz;
+            x = adc_buf[i][0];
+            min = (x < min) ? x : min;
+            max = (x > max) ? x : max;
+            mean = mean + x * one_over_sz;
             //printf("ndx=%d, raw=%d val=%f\r\n", i, adc_buf[i] ,x);
           }
-          adc_zero = (int32_t)x + 0.5;
-
+          adc_zero = (int32_t)mean + 0.5;
+          printf("calibration done, adc_zero = %d, min = %d, max = %d\r\n", adc_zero, min, max);
           // set ref channel for startup
           SetInjectedBEMFChannel(&hadc1, ADC_CHANNEL_1);
           SetInjectedBEMFChannel(&hadc2, ADC_CHANNEL_17);
@@ -386,6 +395,18 @@ int main(void)
         }
 
       }
+      else if (state == 2)
+      {
+        // RPM
+        uint16_t encpos = __HAL_TIM_GET_COUNTER(&htim3);
+        if ( encpos0!=0 )
+        {
+          del_count = (int)encpos - encpos0;
+          rpm = 60.0 * (float) del_count / (ENC_CPR * 0.2);
+          
+        }
+        encpos0=encpos;
+      }
 
 
     }
@@ -395,7 +416,8 @@ int main(void)
     {
       //if (state == 3)
       {
-        printf("%d, %d, %d, %u, %u\r\n", adc1_raw, adc2_raw, adc3_raw, state, adc_ndx);
+        int16_t encpos = __HAL_TIM_GET_COUNTER(&htim3);
+        printf("%d, %d, %d, %u, %d, %f\r\n", adc1_raw, adc2_raw, adc3_raw, (uint16_t)encpos, del_count, rpm);
       }
       MON_HANDLER_t0 = DWT->CYCCNT;
     }
@@ -818,30 +840,30 @@ static void MX_TIM1_Init(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief TIM3 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_TIM3_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN TIM3_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END TIM3_Init 0 */
 
   TIM_Encoder_InitTypeDef sConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE BEGIN TIM3_Init 1 */
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  sConfig.EncoderMode = TIM_ENCODERMODE_TI1;
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  sConfig.EncoderMode = TIM_ENCODERMODE_TI12;
   sConfig.IC1Polarity = TIM_ICPOLARITY_RISING;
   sConfig.IC1Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC1Prescaler = TIM_ICPSC_DIV1;
@@ -850,19 +872,19 @@ static void MX_TIM2_Init(void)
   sConfig.IC2Selection = TIM_ICSELECTION_DIRECTTI;
   sConfig.IC2Prescaler = TIM_ICPSC_DIV1;
   sConfig.IC2Filter = 0;
-  if (HAL_TIM_Encoder_Init(&htim2, &sConfig) != HAL_OK)
+  if (HAL_TIM_Encoder_Init(&htim3, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
+  /* USER CODE BEGIN TIM3_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
